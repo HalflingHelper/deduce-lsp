@@ -40,16 +40,243 @@ import lsp_jsonrpc as jsonrpc
 import lsp_utils as utils
 import lsprotocol.types as lsp
 from pygls import server, uris, workspace
+from pygls.workspace import TextDocument
 
 WORKSPACE_SETTINGS = {}
 GLOBAL_SETTINGS = {}
 RUNNER = pathlib.Path(__file__).parent / "lsp_runner.py"
 
 MAX_WORKERS = 5
+
+
+from parser import init_parser, parse, parse_statement, end_of_file
+import parser
+from error import ParseError
+from abstract_syntax import *
+
+
+init_parser()
+
+
+
+def find_tok_diff(new, old):
+    for i , (n, o) in enumerate(zip(new, old)):
+        if n != o: return i
+    
+    if len(new) > len(old): 
+        # Addition to the end
+        return len(old)
+    elif len(old)> len(new): 
+        # Deletion from the end
+        return len(new)
+    else: 
+        return -1
+
+class DeduceLanguageServer(server.LanguageServer):
+    """Language Server for Deduce"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Mapping from name -> (loc, ty)
+
+        self.index = {}
+        self.diagnostics = {}
+
+    def inc_parse(self, doc : TextDocument):
+
+        doc_index = {"stmts": [], "stmt_is": []} if doc.uri not in self.index else self.index[doc.uri]
+
+        stmts = doc_index["stmts"]
+        stmt_is = doc_index["stmt_is"]
+
+        lexed = list(parser.lark_parser.lex(doc.source))
+
+        change_i = find_tok_diff(lexed, parser.token_list)
+    
+        if change_i < 0: 
+            return
+    
+        # Index of the first changed statement
+        # TODO: Improvable with a binary search 
+        stmt_i = next((i-1 for i, x in enumerate(stmt_is) if x > change_i), 0)
+    
+        parser.token_list = lexed
+        parser.current_position = stmt_is[stmt_i] if stmt_is != [] else 0
+    
+        stmts = stmts[:stmt_i]
+    
+        try:
+            while not end_of_file():
+                stmt = parse_statement()
+                
+                stmt_is.append(parser.current_position)
+                stmts.append(stmt)
+    
+                # Do stuff with the statement?
+                match stmt:
+                    case Define(meta, name, ty, body, priv):
+                        doc_index[name] = (meta, ty)
+                    case RecFun(meta, name, type_params, param_types, return_type, cases, priv):
+                        # TODO: I'm lazy atm.
+                        doc_index[name] = (meta, None)
+                    case Theorem(meta, name, what, proof, priv):
+                        # Theorems don't have a type
+                        doc_index[name] = (meta, None)
+                    case Union(meta, name, typarams, constr_list, priv):
+                        doc_index[name] = (meta, None)
+                    case Import(meta, name):
+                        # TODO: Check if file has been parsed, then parse it!
+                        pass
+                    case _:
+                        pass
+        except ParseError as e:
+            self.diagnostics[doc.uri]= [lsp.Diagnostic(
+                    message=e.base_message(),
+                    severity=lsp.DiagnosticSeverity.Error,
+                    range=lsp.Range(
+                        start=lsp.Position(line=e.loc.line-1, character=e.loc.column-1),
+                        end=lsp.Position(line=e.loc.end_line-1, character=e.loc.end_column-1)
+                    )
+                )]
+        else:
+            self.diagnostics[doc.uri] = []
+                
+        self.index[doc.uri] = doc_index
+
+        return stmts
+
+
+# Nodes where I will sync parsing
+stmt_like = set([Assert, Define, RecFun, Theorem, Import, Print, Union ])
+
+
+
 # TODO: Update the language server name and version.
-LSP_SERVER = server.LanguageServer(
-    name="<pytool-display-name>", version="<server version>", max_workers=MAX_WORKERS
+LSP_SERVER = DeduceLanguageServer(
+    name="Deduce Language Server", version="<server version>", max_workers=MAX_WORKERS
 )
+
+# NOTE: This is just to test the one thing
+# TODO: Make this do real completion!
+# Run customified uniquify on save? Track variable locations and scopes!
+# @LSP_SERVER.feature(
+#     lsp.TEXT_DOCUMENT_COMPLETION,
+#     lsp.CompletionOptions(trigger_characters=["."]),
+# )
+# def completions(params: lsp.CompletionParams):
+#     document = LSP_SERVER.workspace.get_document(params.text_document.uri)
+#     current_line = document.lines[params.position.line].strip()
+
+#     if not current_line.endswith("hello."):
+#         return []
+
+#     return [
+#         lsp.CompletionItem(label="world"),
+#         lsp.CompletionItem(label="friend"),
+#     ]
+
+# TODO: Scope
+# Once uniquify is working, then use that output every change or whatever!
+@LSP_SERVER.feature(lsp.TEXT_DOCUMENT_DEFINITION)
+def goto_definition(ls: DeduceLanguageServer, params: lsp.DefinitionParams):
+    """Jump to an object's definition."""
+    doc = ls.workspace.get_text_document(params.text_document.uri)
+
+    word = doc.word_at_position(params.position)
+
+    if doc.uri in ls.index and word in ls.index[doc.uri]:
+        loc : Meta = ls.index[doc.uri][word][0]
+
+    return lsp.Location(uri=doc.uri, range=lsp.Range(
+        start=lsp.Position(line=loc.line-1, character=loc.start_pos - 1),
+        end=lsp.Position(line=loc.line-1, character=loc.end_pos - 1)
+    ))
+
+    # name = False
+
+    # # Cheating a bit here, and this sucks
+    # for linum, line in enumerate(doc.lines):
+    #     if (match := THEOREM.match(line)) is not None:
+    #         name = match.group(1)
+    #         start_char = match.start() + line.find(name)
+            
+    #         if name == word:
+    #             return lsp.Location(uri=doc.uri, range = lsp.Range(
+    #             start=lsp.Position(line=linum, character=start_char),
+    #             end=lsp.Position(line=linum, character=start_char + len(name)),
+    #         ))
+
+    # index = ls.index.get(doc.uri)
+    # if index is None:
+        # return
+
+    # word = doc.word_at_position(params.position)
+
+    # Is word a type?
+    # if (range_ := index["types"].get(word, None)) is not None:
+        # return lsp.Location(uri=doc.uri, range=range_)
+
+
+
+
+# TODO: Is there someway to interrupt current parses?
+# Use threading?
+# def ls_parse(doc : workspace.TextDocument) -> list[lsp.Diagnostic]:
+#     try:
+#         parse(doc.source)
+#     except ParseError as e:
+#         return [lsp.Diagnostic(
+#                 message=e.base_message(),
+#                 severity=lsp.DiagnosticSeverity.Error,
+#                 range=lsp.Range(
+#                     start=lsp.Position(line=e.loc.line-1, character=e.loc.column-1),
+#                     end=lsp.Position(line=e.loc.end_line-1, character=e.loc.end_column-1)
+#                 )
+#             )]
+#     else:
+#         return []
+
+
+@LSP_SERVER.feature(lsp.TEXT_DOCUMENT_DID_OPEN)
+def did_open(ls : DeduceLanguageServer, params: lsp.DidOpenTextDocumentParams):
+    """Parse each document when it is opened"""
+    doc = ls.workspace.get_text_document(params.text_document.uri)
+    ls.inc_parse(doc)
+
+    diagnostics = ls.diagnostics[doc.uri]
+
+    LSP_SERVER.publish_diagnostics(
+        uri=params.text_document.uri,
+        diagnostics = diagnostics)
+
+
+@LSP_SERVER.feature(lsp.TEXT_DOCUMENT_DID_CHANGE)
+def did_save(ls : DeduceLanguageServer, params: lsp.DidChangeTextDocumentParams):
+    """Parse each document when it is saved"""
+    doc = ls.workspace.get_text_document(params.text_document.uri)
+    # diagnostics : list[lsp.Diagnostic] = ls_parse(doc)
+
+    ls.inc_parse(doc)
+
+    diagnostics = ls.diagnostics[doc.uri]
+
+    LSP_SERVER.publish_diagnostics(
+        uri=params.text_document.uri,
+        diagnostics = ls.diagnostics[doc.uri])
+
+
+@LSP_SERVER.feature(lsp.TEXT_DOCUMENT_DID_SAVE)
+def did_save(ls : DeduceLanguageServer, params: lsp.DidSaveTextDocumentParams):
+    """Parse each document when it is saved"""
+    doc = ls.workspace.get_text_document(params.text_document.uri)
+    
+    ls.inc_parse(doc)
+
+    diagnostics = ls.diagnostics[doc.uri]
+    
+    LSP_SERVER.publish_diagnostics(
+        uri=params.text_document.uri,
+        diagnostics = diagnostics)
 
 
 # **********************************************************
@@ -65,13 +292,9 @@ LSP_SERVER = server.LanguageServer(
 #  Black: https://github.com/microsoft/vscode-black-formatter/blob/main/bundled/tool
 #  isort: https://github.com/microsoft/vscode-isort/blob/main/bundled/tool
 
-# TODO: Update TOOL_MODULE with the module name for your tool.
-# e.g, TOOL_MODULE = "pylint"
-TOOL_MODULE = "<pytool-module>"
+TOOL_MODULE = "deduce-lsp"
 
-# TODO: Update TOOL_DISPLAY with a display name for your tool.
-# e.g, TOOL_DISPLAY = "Pylint"
-TOOL_DISPLAY = "<pytool-display-name>"
+TOOL_DISPLAY = "Deduce Language Server"
 
 # TODO: Update TOOL_ARGS with default argument you have to pass to your tool in
 # all scenarios.
@@ -88,28 +311,28 @@ TOOL_ARGS = []  # default arguments always passed to your tool.
 #  Pylint: https://github.com/microsoft/vscode-pylint/blob/main/bundled/tool
 
 
-@LSP_SERVER.feature(lsp.TEXT_DOCUMENT_DID_OPEN)
-def did_open(params: lsp.DidOpenTextDocumentParams) -> None:
-    """LSP handler for textDocument/didOpen request."""
-    document = LSP_SERVER.workspace.get_document(params.text_document.uri)
-    diagnostics: list[lsp.Diagnostic] = _linting_helper(document)
-    LSP_SERVER.publish_diagnostics(document.uri, diagnostics)
+# @LSP_SERVER.feature(lsp.TEXT_DOCUMENT_DID_OPEN)
+# def did_open(params: lsp.DidOpenTextDocumentParams) -> None:
+#     """LSP handler for textDocument/didOpen request."""
+#     document = LSP_SERVER.workspace.get_document(params.text_document.uri)
+#     diagnostics: list[lsp.Diagnostic] = _linting_helper(document)
+#     LSP_SERVER.publish_diagnostics(document.uri, diagnostics)
 
 
-@LSP_SERVER.feature(lsp.TEXT_DOCUMENT_DID_SAVE)
-def did_save(params: lsp.DidSaveTextDocumentParams) -> None:
-    """LSP handler for textDocument/didSave request."""
-    document = LSP_SERVER.workspace.get_document(params.text_document.uri)
-    diagnostics: list[lsp.Diagnostic] = _linting_helper(document)
-    LSP_SERVER.publish_diagnostics(document.uri, diagnostics)
+# @LSP_SERVER.feature(lsp.TEXT_DOCUMENT_DID_SAVE)
+# def did_save(params: lsp.DidSaveTextDocumentParams) -> None:
+#     """LSP handler for textDocument/didSave request."""
+#     document = LSP_SERVER.workspace.get_document(params.text_document.uri)
+#     diagnostics: list[lsp.Diagnostic] = _linting_helper(document)
+#     LSP_SERVER.publish_diagnostics(document.uri, diagnostics)
 
 
-@LSP_SERVER.feature(lsp.TEXT_DOCUMENT_DID_CLOSE)
-def did_close(params: lsp.DidCloseTextDocumentParams) -> None:
-    """LSP handler for textDocument/didClose request."""
-    document = LSP_SERVER.workspace.get_document(params.text_document.uri)
-    # Publishing empty diagnostics to clear the entries for this file.
-    LSP_SERVER.publish_diagnostics(document.uri, [])
+# @LSP_SERVER.feature(lsp.TEXT_DOCUMENT_DID_CLOSE)
+# def did_close(params: lsp.DidCloseTextDocumentParams) -> None:
+#     """LSP handler for textDocument/didClose request."""
+#     document = LSP_SERVER.workspace.get_document(params.text_document.uri)
+#     # Publishing empty diagnostics to clear the entries for this file.
+#     LSP_SERVER.publish_diagnostics(document.uri, [])
 
 
 def _linting_helper(document: workspace.Document) -> list[lsp.Diagnostic]:
@@ -193,21 +416,21 @@ def _get_severity(*_codes: list[str]) -> lsp.DiagnosticSeverity:
 #  Black: https://github.com/microsoft/vscode-black-formatter/blob/main/bundled/tool
 
 
-@LSP_SERVER.feature(lsp.TEXT_DOCUMENT_FORMATTING)
-def formatting(params: lsp.DocumentFormattingParams) -> list[lsp.TextEdit] | None:
-    """LSP handler for textDocument/formatting request."""
-    # If your tool is a formatter you can use this handler to provide
-    # formatting support on save. You have to return an array of lsp.TextEdit
-    # objects, to provide your formatted results.
+# @LSP_SERVER.feature(lsp.TEXT_DOCUMENT_FORMATTING)
+# def formatting(params: lsp.DocumentFormattingParams) -> list[lsp.TextEdit] | None:
+#     """LSP handler for textDocument/formatting request."""
+#     # If your tool is a formatter you can use this handler to provide
+#     # formatting support on save. You have to return an array of lsp.TextEdit
+#     # objects, to provide your formatted results.
 
-    document = LSP_SERVER.workspace.get_document(params.text_document.uri)
-    edits = _formatting_helper(document)
-    if edits:
-        return edits
+#     document = LSP_SERVER.workspace.get_document(params.text_document.uri)
+#     edits = _formatting_helper(document)
+#     if edits:
+#         return edits
 
-    # NOTE: If you provide [] array, VS Code will clear the file of all contents.
-    # To indicate no changes to file return None.
-    return None
+#     # NOTE: If you provide [] array, VS Code will clear the file of all contents.
+#     # To indicate no changes to file return None.
+#     return None
 
 
 def _formatting_helper(document: workspace.Document) -> list[lsp.TextEdit] | None:

@@ -1,0 +1,18 @@
+[] Commit hooks to sync with deduce? / Action
+
+[] Incremental Parsing
+  - On change
+  - Lex the file
+  - Compare to old token stream
+  - Find the statement potentially effected
+  - Parse statements from there
+    - If possible, resync!
+  
+
+Problem: What about deletion from front?
+i.e. Removing an import line?
+This shouldn't reparse the whole file
+  
+So what state does the LSP need to maintain explicitly?
+- token_list
+- current_position to set at the start?
