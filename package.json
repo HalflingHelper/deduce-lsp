@@ -1,22 +1,22 @@
 {
     "name": "deduce-lsp",
     "displayName": "Deduce Language Server",
-    "description": "Linting support for python files using `deduce-lsp`.",
-    "version": "2022.0.0-dev",
+    "description": "LSP Support for deduce.",
+    "version": "0.0.1",
     "preview": true,
     "serverInfo": {
         "name": "Deduce Language Server",
         "module": "deduce-lsp"
     },
-    "publisher": "<my-publisher>",
+    "publisher": "CalvinJosenhans",
     "license": "MIT",
-    "homepage": "https://github.com/<my-github>/<my-extension-project>",
+    "homepage": "https://github.com/HalflingHelper/deduce-lsp",
     "repository": {
         "type": "git",
-        "url": "https://github.com/<my-github>/<my-extension-project>.git"
+        "url": "https://github.com/HalflingHelper/deduce-lsp.git"
     },
     "bugs": {
-        "url": "https://github.com/<my-github>/<my-extension-project>/issues"
+        "url": "https://github.com/HalflingHelper/deduce-lsp/issues"
     },
     "galleryBanner": {
         "color": "#1e415e",

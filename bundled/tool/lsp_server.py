@@ -49,12 +49,13 @@ RUNNER = pathlib.Path(__file__).parent / "lsp_runner.py"
 MAX_WORKERS = 5
 
 
-from parser import init_parser, parse, parse_statement, end_of_file
-import parser
+from rec_desc_parser import init_parser, parse, parse_statement, end_of_file, set_deduce_directory
+import rec_desc_parser as parser
 from error import ParseError
 from abstract_syntax import *
 
 
+set_deduce_directory(".")
 init_parser()
 
 
@@ -77,13 +78,12 @@ class DeduceLanguageServer(server.LanguageServer):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Mapping from name -> (loc, ty)
 
         self.index = {}
         self.diagnostics = {}
 
     def inc_parse(self, doc : TextDocument):
-
+        # TODO: Create a type for things in the index
         doc_index = {"stmts": [], "stmt_is": []} if doc.uri not in self.index else self.index[doc.uri]
 
         stmts = doc_index["stmts"]
@@ -104,8 +104,10 @@ class DeduceLanguageServer(server.LanguageServer):
         parser.current_position = stmt_is[stmt_i] if stmt_is != [] else 0
     
         stmts = stmts[:stmt_i]
-    
+        stmt_is = stmt_is[:stmt_i]
+
         try:
+            imports = []
             while not end_of_file():
                 stmt = parse_statement()
                 
@@ -115,20 +117,36 @@ class DeduceLanguageServer(server.LanguageServer):
                 # Do stuff with the statement?
                 match stmt:
                     case Define(meta, name, ty, body, priv):
-                        doc_index[name] = (meta, ty)
+                        doc_index[name] = (meta, ty, str(stmt), lsp.CompletionItemKind.Variable)
                     case RecFun(meta, name, type_params, param_types, return_type, cases, priv):
-                        # TODO: I'm lazy atm.
-                        doc_index[name] = (meta, None)
+                        # TODO: I'm being lazy wrt types
+                        doc_index[name] = (meta, None, "\n\t".join([str(c) for c in cases]), lsp.CompletionItemKind.Function)
                     case Theorem(meta, name, what, proof, priv):
                         # Theorems don't have a type
-                        doc_index[name] = (meta, None)
+                        doc_index[name] = (meta, None, str(what), lsp.CompletionItemKind.Function)
                     case Union(meta, name, typarams, constr_list, priv):
-                        doc_index[name] = (meta, None)
+                        pretty = name + "{\n\t" \
+                        + "\n\t".join([str(c) for c in constr_list]) + "\n}"
+
+                        doc_index[name] = (meta, None, pretty, lsp.CompletionItemKind.Struct)
+                        for c in constr_list:
+                            doc_index[c.name] = (c.location, None, pretty, lsp.CompletionItemKind.Variable)
                     case Import(meta, name):
-                        # TODO: Check if file has been parsed, then parse it!
+                        # TODO: Search in any open folders
+                        docs = self.workspace.text_documents
+
+                        for d in docs:
+                            if d.endswith(name + ".pf"):
+                                imports.append(docs[d])
+
+
                         pass
                     case _:
                         pass
+            
+            for i in imports:
+                self.inc_parse(i)
+            
         except ParseError as e:
             self.diagnostics[doc.uri]= [lsp.Diagnostic(
                     message=e.base_message(),
@@ -156,24 +174,127 @@ LSP_SERVER = DeduceLanguageServer(
     name="Deduce Language Server", version="<server version>", max_workers=MAX_WORKERS
 )
 
-# NOTE: This is just to test the one thing
 # TODO: Make this do real completion!
 # Run customified uniquify on save? Track variable locations and scopes!
-# @LSP_SERVER.feature(
-#     lsp.TEXT_DOCUMENT_COMPLETION,
-#     lsp.CompletionOptions(trigger_characters=["."]),
-# )
-# def completions(params: lsp.CompletionParams):
-#     document = LSP_SERVER.workspace.get_document(params.text_document.uri)
-#     current_line = document.lines[params.position.line].strip()
 
-#     if not current_line.endswith("hello."):
-#         return []
 
-#     return [
-#         lsp.CompletionItem(label="world"),
-#         lsp.CompletionItem(label="friend"),
-#     ]
+@LSP_SERVER.feature(
+        lsp.TEXT_DOCUMENT_SIGNATURE_HELP,
+        lsp.SignatureHelpOptions(trigger_characters=["(", ")"])
+)
+def signature_help(ls : DeduceLanguageServer, params: lsp.SignatureHelpParams):
+    doc = ls.workspace.get_document(params.text_document.uri)
+    current_line = doc.lines[params.position.line].strip()
+    
+    fun_match = False
+    fun_i = 0
+    fun_name = ""
+
+
+    for m in re.finditer(r"\((([^)],?)*)", current_line):
+        if m.start() <= params.position.character and m.end() >=  params.position.character:
+            fun_match = m
+            fun_i = params.position.character - m.start()
+            fun_name = doc.word_at_position(
+                lsp.Position(
+                    params.position.line,
+                    m.start() - 1
+                )
+            )
+
+    # TODO: Lookup info in index (write helper, since I'm doing this a lot)
+    # TODO: Use fun_i to do bold in the markdown help?
+    # TODO: Combine both types of complete
+    if fun_match:
+        active_param = len(fun_match.group(1)[:fun_i].split(",")) - 1
+
+        return lsp.SignatureHelp(
+            [
+                lsp.SignatureInformation(
+                label=fun_name,
+                documentation="Look for docstring?",
+                parameters=[
+                    lsp.ParameterInformation("asdf", "A thing"),
+                    lsp.ParameterInformation("qwer", "Parameter 2"),
+                ],
+                active_parameter=active_param
+            )]
+        )
+
+@LSP_SERVER.feature(
+    lsp.TEXT_DOCUMENT_COMPLETION,
+    # lsp.CompletionOptions(trigger_characters=["("]),
+)
+def completions(ls : DeduceLanguageServer, params: lsp.CompletionParams):
+    doc = ls.workspace.get_document(params.text_document.uri)
+    current_line = doc.lines[params.position.line].strip()
+
+    # parens = re.findall(r"\([^)]*", current_line)
+
+    
+    
+    word = doc.word_at_position(params.position)
+
+
+
+    # TODO: This in all files
+    if doc.uri in ls.index:
+        # ls.index[doc.uri].keys()
+
+        return [
+            lsp.CompletionItem(label=x, 
+                            #    label_details=lsp.CompletionItemLabelDetails("Asdf"), 
+                               kind=ls.index[doc.uri][x][3]) 
+            for x in filter(lambda k : k.find(word) != -1, ls.index[doc.uri].keys())
+            ]
+
+
+
+# Hover
+@LSP_SERVER.feature(lsp.TEXT_DOCUMENT_HOVER)
+def hover(ls : DeduceLanguageServer, params: lsp.HoverParams):
+    pos = params.position
+    document_uri = params.text_document.uri
+    document = ls.workspace.get_text_document(document_uri)
+
+    try:
+        line : str = document.lines[pos.line]
+    except IndexError:
+        return None
+
+    # Get the word hovered
+    word = document.word_at_position(params.position)
+
+    if word == '':
+        # TODO: Look for operators
+        pass
+
+    if word == '': return
+
+    word_i = 0
+    
+    for m in re.finditer(word, line):
+        if m.start() <= params.position.character and m.end() >=  params.position.character:
+            word_i = m.start()
+
+
+    for k in ls.index:
+        if word in ls.index[k]:
+            return lsp.Hover(
+                contents=lsp.MarkupContent(
+                    kind=lsp.MarkupKind.PlainText,
+                    value=ls.index[k][word][2]
+                ),
+                range=lsp.Range(
+                    start=lsp.Position(line=pos.line, character=word_i),
+                    end=lsp.Position(line=pos.line, character=word_i + len(word))
+                )
+            )
+
+
+   
+
+
 
 # TODO: Scope
 # Once uniquify is working, then use that output every change or whatever!
@@ -187,35 +308,10 @@ def goto_definition(ls: DeduceLanguageServer, params: lsp.DefinitionParams):
     if doc.uri in ls.index and word in ls.index[doc.uri]:
         loc : Meta = ls.index[doc.uri][word][0]
 
-    return lsp.Location(uri=doc.uri, range=lsp.Range(
-        start=lsp.Position(line=loc.line-1, character=loc.start_pos - 1),
-        end=lsp.Position(line=loc.line-1, character=loc.end_pos - 1)
-    ))
-
-    # name = False
-
-    # # Cheating a bit here, and this sucks
-    # for linum, line in enumerate(doc.lines):
-    #     if (match := THEOREM.match(line)) is not None:
-    #         name = match.group(1)
-    #         start_char = match.start() + line.find(name)
-            
-    #         if name == word:
-    #             return lsp.Location(uri=doc.uri, range = lsp.Range(
-    #             start=lsp.Position(line=linum, character=start_char),
-    #             end=lsp.Position(line=linum, character=start_char + len(name)),
-    #         ))
-
-    # index = ls.index.get(doc.uri)
-    # if index is None:
-        # return
-
-    # word = doc.word_at_position(params.position)
-
-    # Is word a type?
-    # if (range_ := index["types"].get(word, None)) is not None:
-        # return lsp.Location(uri=doc.uri, range=range_)
-
+        return lsp.Location(uri=doc.uri, range=lsp.Range(
+            start=lsp.Position(line=loc.line-1, character=loc.column - 1),
+            end=lsp.Position(line=loc.line-1, character=loc.column - 1)
+        ))
 
 
 

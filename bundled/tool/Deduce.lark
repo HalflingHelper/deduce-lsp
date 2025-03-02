@@ -2,29 +2,31 @@ DIGIT: /[0-9]/
 INT: DIGIT+
 UPPER: /[A-Z]/
 LOWER: /[a-z]/
-OPERATOR: /[\-\+*%=≠<>≤≥&∘∪∩⊆∈⨄]/
+OPERATOR: /[\-\+*%=≠<>≤≥&∘∪∩⊆∈⨄⊝]/
 IDENT: (/_/|UPPER|LOWER) (/_/|UPPER|LOWER|DIGIT|/[₀₁₂₃₄₅₆₇₈₉!?']/)*
 NEWLINE: (/\r/? /\n/)+
 WS: /[ \t\f\r\n]/+
 LINECOMMENT: "//" /[^\n]*/ 
-COMMENT: /\/\*([^\*]|\*+[^\/])*\*+\//
+COMMENT: /\/\*(\*(?!\/)|[^*])*\*\//
 
-?term: term "iff" term_log                            -> iff_formula
-    | term "<=>" term_log                            -> iff_formula
-    | term "⇔" term_log                            -> iff_formula
+?term:  term_iff
+
+?term_iff: term_iff "iff" term_log                     -> iff_formula
+    | term_iff "<=>" term_log                          -> iff_formula
+    | term_iff "⇔" term_log                            -> iff_formula
     | term_log
 
-?term_log: term_log "and" term_compare                    -> and_formula
-    | term_log "or" term_compare                      -> or_formula
+?term_log: term_log "and" term_equal                    -> and_formula
+    | term_log "or" term_equal                      -> or_formula
     | term_log ":" type                           -> annote_type
-    | "if" term_log "then" term_log "else" term_log       -> conditional
-    | "if" term_log "then" term_log                  -> if_then_formula
+    | term_equal
+
+?term_equal: term_equal "=" term_compare  -> equal
+    | term_equal "≠" term_compare                       -> not_equal
+    | term_equal "/=" term_compare                       -> not_equal
     | term_compare
 
-?term_compare: term_compare "=" term_add             -> equal
-    | term_compare "≠" term_add                       -> not_equal
-    | term_compare "/=" term_add                       -> not_equal
-    | term_compare "<" term_add                        -> less
+?term_compare: term_compare "<" term_add                        -> less
     | term_compare ">" term_add                        -> greater
     | term_compare "≤" term_add                       -> less_equal
     | term_compare "<=" term_add                       -> less_equal
@@ -45,6 +47,7 @@ COMMENT: /\/\*([^\*]|\*+[^\/])*\*+\//
     | term_med ".+." term_add                      -> multiset_sum
     | term_med "++" term_add                       -> append
     | term_add "-" term_med                        -> sub
+    | term_add "⊝" term_med                        -> nat_sub
     | term_med
 
 ?term_med: term_med "/" term_hi                    -> div
@@ -86,8 +89,8 @@ ident: IDENT              -> ident
     | "array" "(" term ")"                         -> make_array
     | term_hi "(" term_list ")"                    -> call
     | term_hi "[" term "]"                         -> array_get
-    | "λ" var_list "{" term "}"                    -> lambda
-    | "fun" var_list "{" term "}"                  -> lambda
+    | "λ" type_params_opt var_list "{" term "}"    -> lambda
+    | "fun" type_params_opt var_list "{" term "}"  -> lambda
     | "generic" ident_list "{" term "}"            -> generic
     | "switch" term "{" switch_list "}"            -> switch
     | "all" type_annot_list "." term               -> all_formula
@@ -96,9 +99,12 @@ ident: IDENT              -> ident
     | "define" IDENT "=" term ";" term             -> define_term
     | "?"                                          -> hole_term
     | "─"                                          -> omitted_term
+    | "__"                                         -> omitted_term
     | "(" term ")"                                 -> paren
     | "[" term_list "]"                            -> list_literal
     | "#" term "#"                                 -> mark
+    | "if" term "then" term "else" term            -> conditional
+    | "if" term "then" term                        -> if_then_formula
     | "%" type
     
 ?term_list:                                        -> empty
@@ -108,6 +114,12 @@ ident: IDENT              -> ident
 ?ident_list:                                       -> empty
     | ident                                        -> single
     | ident "," ident_list                         -> push
+
+?ident_list_bar:                                   -> empty
+    | ident                                        -> single
+    | INT "*" ident                                -> repeat
+    | ident "|" ident_list_bar                     -> push
+    | INT "*" ident "|" ident_list_bar             -> push_repeat
 
 ?type_annot_list:                                  -> empty_binding
     | ident ":" type                               -> single_binding
@@ -153,7 +165,7 @@ ident: IDENT              -> ident
     | proof "|" proof_list                         -> push
 
 ?proof: conclusion                                 -> single_proof
-    | proof_stmt proof                             -> push_proof
+    | proof_stmt proof?                            -> push_proof
 
 ?conclusion: "conclude" term "by" proof                  -> annot
     | proof "," proof                                    -> tuple
@@ -162,13 +174,17 @@ ident: IDENT              -> ident
     | "cases" proof case_list                            -> cases
     | "induction" type ind_case_list                     -> induction
     | "definition" "{" ident_list "}"                   -> reason_definition
-    | "definition" ident                                -> reason_definition_one
+    | "definition" ident_list_bar                       -> reason_definition
     | "rewrite" proof_list                              -> reason_rewrite
+    | "replace" proof_list                              -> reason_rewrite
     | "definition" "{" ident_list "}" "and" "rewrite" proof_list -> reason_def_rewrite
-    | "definition" ident "and" "rewrite" proof_list       -> reason_def_one_rewrite
+    | "definition" "{" ident_list "}" "and" "replace" proof_list -> reason_def_rewrite
+    | "definition" ident_list_bar "and" "rewrite" proof_list -> reason_def_rewrite
+    | "definition" ident_list_bar "and" "replace" proof_list -> reason_def_rewrite
     | "definition" "{" ident_list "}" "in" proof         -> apply_defs_fact
-    | "definition" ident "in" proof                      -> apply_defs_fact_one
+    | "definition" ident_list_bar "in" proof             -> apply_defs_fact
     | "rewrite" proof_list "in" proof                    -> rewrite_fact
+    | "replace" proof_list "in" proof                    -> rewrite_fact
     | "evaluate"                                         -> eval_goal
     | "evaluate" "in" proof                              -> eval_fact
     | "switch" term "{" switch_pf_case_list "}"          -> switch_proof
@@ -212,7 +228,6 @@ ident: IDENT              -> ident
     | "suppose" IDENT                               -> imp_intro
     | "suppose" IDENT ":" term                      -> imp_intro_explicit
     | "suppose" ":" term                            -> imp_intro_anon
-    | "term" term "by" proof                        -> term_proof
 
 ?case: "case" IDENT "{" proof "}"                        -> case
     | "case" IDENT ":" term "{" proof "}"                -> case_annot
@@ -264,8 +279,13 @@ ident: IDENT              -> ident
 
 ?fun_case_list: fun_case                               -> single
     | fun_case fun_case_list                           -> push
-    
+
+?private: "private" statement -> private
+
 ?rec_function: "function" ident type_params_opt "(" type_list ")" "->" type "{" fun_case_list "}" -> rec_fun
+ | "recursive" ident type_params_opt "(" type_list ")" "->" type "{" fun_case_list "}" -> rec_fun
+
+?function: "fun" ident type_params_opt "(" var_list ")" "{" term "}" -> fun
 
 ?definition: "define" ident "=" term      -> define
  | "define" ident ":" type "=" term       -> define_annot
@@ -276,18 +296,23 @@ ident: IDENT              -> ident
 
 ?print: "print" term                               -> print
 
+?assoc_decl: "associative" ident type_params_opt "in" type -> assoc_decl
+
 ?statement: theorem
  | union
  | rec_function
+ | function
  | definition
  | import
  | assert
  | print
+ | private
+ | assoc_decl
 
 ?statement_list: statement                               -> single
     | statement statement_list                           -> push
 
-program: statement_list
+program: statement_list |
 
 %ignore COMMENT
 %ignore LINECOMMENT

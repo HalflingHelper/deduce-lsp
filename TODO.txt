@@ -1,6 +1,10 @@
 [] Commit hooks to sync with deduce? / Action
 
+[] Semantic Tokens
+[] Actual rename?
+
 [] Incremental Parsing
+  - Currently reparses everything that comes after?
   - On change
   - Lex the file
   - Compare to old token stream
@@ -8,10 +12,12 @@
   - Parse statements from there
     - If possible, resync!
   
+[] Parsing imports
 
 Problem: What about deletion from front?
 i.e. Removing an import line?
 This shouldn't reparse the whole file
+  - Problems with position sync, I think we're fine
   
 So what state does the LSP need to maintain explicitly?
 - token_list
