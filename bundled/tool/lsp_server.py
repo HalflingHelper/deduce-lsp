@@ -120,7 +120,7 @@ class DeduceLanguageServer(server.LanguageServer):
                         doc_index[name] = (meta, ty, str(stmt), lsp.CompletionItemKind.Variable)
                     case RecFun(meta, name, type_params, param_types, return_type, cases, priv):
                         # TODO: I'm being lazy wrt types
-                        doc_index[name] = (meta, None, "\n\t".join([str(c) for c in cases]), lsp.CompletionItemKind.Function)
+                        doc_index[name] = (meta, None, stmt.pretty_print(0), lsp.CompletionItemKind.Function)
                     case Theorem(meta, name, what, proof, priv):
                         # Theorems don't have a type
                         doc_index[name] = (meta, None, str(what), lsp.CompletionItemKind.Function)
@@ -174,13 +174,10 @@ LSP_SERVER = DeduceLanguageServer(
     name="Deduce Language Server", version="<server version>", max_workers=MAX_WORKERS
 )
 
-# TODO: Make this do real completion!
-# Run customified uniquify on save? Track variable locations and scopes!
-
-
+# TODO: Signatures for theorems!
 @LSP_SERVER.feature(
         lsp.TEXT_DOCUMENT_SIGNATURE_HELP,
-        lsp.SignatureHelpOptions(trigger_characters=["(", ")"])
+        lsp.SignatureHelpOptions(trigger_characters=["(", ")", "[", "]"])
 )
 def signature_help(ls : DeduceLanguageServer, params: lsp.SignatureHelpParams):
     doc = ls.workspace.get_document(params.text_document.uri)
@@ -190,8 +187,8 @@ def signature_help(ls : DeduceLanguageServer, params: lsp.SignatureHelpParams):
     fun_i = 0
     fun_name = ""
 
-
-    for m in re.finditer(r"\((([^)],?)*)", current_line):
+    # TODO: Better parsing for where the characters are, esp since mixing functions and theorems
+    for m in re.finditer(r"[([](([^)],?)*)", current_line):
         if m.start() <= params.position.character and m.end() >=  params.position.character:
             fun_match = m
             fun_i = params.position.character - m.start()
@@ -202,7 +199,12 @@ def signature_help(ls : DeduceLanguageServer, params: lsp.SignatureHelpParams):
                 )
             )
 
-    # TODO: Lookup info in index (write helper, since I'm doing this a lot)
+    fun_sig = fun_name
+
+    for uri in ls.index:
+        if fun_name in ls.index[uri]:
+            fun_sig = ls.index[uri][fun_name][2].split("\n")[0][:-1]
+
     # TODO: Use fun_i to do bold in the markdown help?
     # TODO: Combine both types of complete
     if fun_match:
@@ -211,43 +213,36 @@ def signature_help(ls : DeduceLanguageServer, params: lsp.SignatureHelpParams):
         return lsp.SignatureHelp(
             [
                 lsp.SignatureInformation(
-                label=fun_name,
-                documentation="Look for docstring?",
-                parameters=[
-                    lsp.ParameterInformation("asdf", "A thing"),
-                    lsp.ParameterInformation("qwer", "Parameter 2"),
-                ],
-                active_parameter=active_param
+                label=fun_sig,
+                # documentation="Look for docstring?",
+                # parameters=[
+                #     lsp.ParameterInformation("asdf", "A thing"),
+                #     lsp.ParameterInformation("qwer", "Parameter 2"),
+                # ],
+                # active_parameter=active_param
             )]
         )
 
 @LSP_SERVER.feature(
     lsp.TEXT_DOCUMENT_COMPLETION,
-    # lsp.CompletionOptions(trigger_characters=["("]),
 )
 def completions(ls : DeduceLanguageServer, params: lsp.CompletionParams):
     doc = ls.workspace.get_document(params.text_document.uri)
     current_line = doc.lines[params.position.line].strip()
 
-    # parens = re.findall(r"\([^)]*", current_line)
-
-    
-    
     word = doc.word_at_position(params.position)
 
+    res = []
 
-
-    # TODO: This in all files
-    if doc.uri in ls.index:
-        # ls.index[doc.uri].keys()
-
-        return [
+    for uri in ls.index:
+        res += [
             lsp.CompletionItem(label=x, 
                             #    label_details=lsp.CompletionItemLabelDetails("Asdf"), 
                                kind=ls.index[doc.uri][x][3]) 
-            for x in filter(lambda k : k.find(word) != -1, ls.index[doc.uri].keys())
+            for x in filter(lambda k : k.find(word) != -1, ls.index[uri].keys())
             ]
 
+    return res
 
 
 # Hover
@@ -291,8 +286,6 @@ def hover(ls : DeduceLanguageServer, params: lsp.HoverParams):
                 )
             )
 
-
-   
 
 
 

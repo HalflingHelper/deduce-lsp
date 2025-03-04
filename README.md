@@ -10,6 +10,7 @@ This comes from the template for pygls lsp things.
 - Token autocomplete
 - Jump to definition
 - Definition on hover
+- Signature Advice
 
 More to come
 
