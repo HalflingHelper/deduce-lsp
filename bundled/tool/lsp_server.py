@@ -13,6 +13,9 @@ import sysconfig
 import traceback
 from typing import Any, Optional, Sequence
 
+from pathlib import Path
+from urllib.parse import urljoin, urlparse, urlunparse
+
 
 # **********************************************************
 # Update sys.path before importing any bundled libraries.
@@ -53,6 +56,10 @@ from rec_desc_parser import init_parser, parse, parse_statement, end_of_file, se
 import rec_desc_parser as parser
 from error import ParseError
 from abstract_syntax import *
+import proof_checker
+
+import asyncio
+
 
 
 set_deduce_directory(".")
@@ -72,6 +79,49 @@ def find_tok_diff(new, old):
         return len(new)
     else: 
         return -1
+    
+
+class DeduceItem():
+    """Items in the index"""
+
+    def __init__(self, loc : Meta, ty, str, comp_ty : lsp.CompletionItemKind, ast_node):
+        self.loc = loc
+        self.ty = ty
+        self.str = str
+        self.completion = comp_ty
+        self.ast = ast_node
+
+
+class DocIndex():
+    def __init__(self):
+        self.stmts = []
+        self.stmt_is = []
+        self.data = {}
+        self.one_grams = {}
+    
+
+    def add(self, k : str, v):
+        for c in k:
+            self.one_grams.setdefault(c, set()).add(k)
+        
+        self.data[k] = v
+
+    def search(self, k : str):
+        s : set = self.one_grams.get(k[0], set())
+        for c in k[1:]:
+            s = s.intersection(self.one_grams.get(c, set()))
+        
+        return list(filter(lambda w : w.find(k) != -1, s))
+
+
+    def __contains__(self, item):
+        return item in self.data
+    
+    def __getitem__(self, item):
+        return self.data[item]
+
+# Nodes where I will sync parsing
+stmt_like = set([Assert, Define, RecFun, Theorem, Import, Print, Union])
 
 class DeduceLanguageServer(server.LanguageServer):
     """Language Server for Deduce"""
@@ -81,13 +131,38 @@ class DeduceLanguageServer(server.LanguageServer):
 
         self.index = {}
         self.diagnostics = {}
+        self.pending_tasks = {}
+
+    async def debounce_parse(self, doc : TextDocument):
+        """Debounce function to delay parsing after rapid edits."""
+
+        PARSE_DELAY = 0.5  # Adjust as needed
+        
+        if doc.uri in self.pending_tasks:
+            self.pending_tasks[doc.uri].cancel()  # Cancel previous task
+            try:
+                await self.pending_tasks[doc.uri]  # Ensure proper cancellation handling
+            except asyncio.CancelledError:
+                pass  # Ignore cancellation exceptions
+            
+    
+        async def delayed_parse():
+            try:
+                await asyncio.sleep(PARSE_DELAY)  # Wait for more edits
+                self.inc_parse(doc)  # Ensure parsing completes before proceeding
+            except asyncio.CancelledError:
+                pass  # Silently ignore cancelled tasks
+    
+        task = asyncio.create_task(delayed_parse())
+        self.pending_tasks[doc.uri] = task
+        await task
 
     def inc_parse(self, doc : TextDocument):
-        # TODO: Create a type for things in the index
-        doc_index = {"stmts": [], "stmt_is": []} if doc.uri not in self.index else self.index[doc.uri]
+        # doc_index = {"stmts": [], "stmt_is": []} if doc.uri not in self.index else self.index[doc.uri]
+        doc_index = self.index.get(doc.uri, DocIndex())
 
-        stmts = doc_index["stmts"]
-        stmt_is = doc_index["stmt_is"]
+        stmts = doc_index.stmts
+        stmt_is = doc_index.stmt_is
 
         lexed = list(parser.lark_parser.lex(doc.source))
 
@@ -97,7 +172,6 @@ class DeduceLanguageServer(server.LanguageServer):
             return
     
         # Index of the first changed statement
-        # TODO: Improvable with a binary search 
         stmt_i = next((i-1 for i, x in enumerate(stmt_is) if x > change_i), 0)
     
         parser.token_list = lexed
@@ -114,34 +188,35 @@ class DeduceLanguageServer(server.LanguageServer):
                 stmt_is.append(parser.current_position)
                 stmts.append(stmt)
     
-                # Do stuff with the statement?
                 match stmt:
                     case Define(meta, name, ty, body, priv):
-                        doc_index[name] = (meta, ty, str(stmt), lsp.CompletionItemKind.Variable)
+                        doc_index.add(name, DeduceItem(meta, ty, str(stmt), lsp.CompletionItemKind.Variable, stmt))
                     case RecFun(meta, name, type_params, param_types, return_type, cases, priv):
                         # TODO: I'm being lazy wrt types
-                        doc_index[name] = (meta, None, stmt.pretty_print(0), lsp.CompletionItemKind.Function)
+                        doc_index.add(name, DeduceItem(meta, None, stmt.pretty_print(0), lsp.CompletionItemKind.Function, stmt))
                     case Theorem(meta, name, what, proof, priv):
                         # Theorems don't have a type
-                        doc_index[name] = (meta, None, str(what), lsp.CompletionItemKind.Function)
+                        doc_index.add(name, DeduceItem(meta, None, str(what), lsp.CompletionItemKind.Function, stmt))
                     case Union(meta, name, typarams, constr_list, priv):
                         pretty = name + "{\n\t" \
                         + "\n\t".join([str(c) for c in constr_list]) + "\n}"
 
-                        doc_index[name] = (meta, None, pretty, lsp.CompletionItemKind.Struct)
+                        doc_index.add(name, DeduceItem(meta, None, pretty, lsp.CompletionItemKind.Struct, stmt))
                         for c in constr_list:
-                            doc_index[c.name] = (c.location, None, pretty, lsp.CompletionItemKind.Variable)
+                            doc_index.add(c.name, DeduceItem(c.location, None, pretty, lsp.CompletionItemKind.Variable, stmt))
                     case Import(meta, name):
-                        # TODO: Search in any open folders
-                        docs = self.workspace.text_documents
+                        # TODO: Be smarter about what could be included
+                        base_path = os.path.dirname(doc.path)
 
-                        for d in docs:
-                            if d.endswith(name + ".pf"):
-                                imports.append(docs[d])
+                        potential_path = os.path.join(base_path, name + ".pf")
 
-
-                        pass
-                    case _:
+                        if os.path.exists(potential_path):
+                            imports.append(self.workspace.get_text_document(Path(potential_path).absolute().as_uri()))
+                        else:
+                            potential_path = os.path.join(base_path, 'lib', name + ".pf")
+                            if os.path.exists(potential_path):
+                                imports.append(self.workspace.get_text_document(Path(potential_path).absolute().as_uri()))
+                    case _: # Irrelevant statements
                         pass
             
             for i in imports:
@@ -164,46 +239,63 @@ class DeduceLanguageServer(server.LanguageServer):
         return stmts
 
 
-# Nodes where I will sync parsing
-stmt_like = set([Assert, Define, RecFun, Theorem, Import, Print, Union ])
 
 
-
-# TODO: Update the language server name and version.
 LSP_SERVER = DeduceLanguageServer(
-    name="Deduce Language Server", version="<server version>", max_workers=MAX_WORKERS
+    name="Deduce Language Server", version="0.0.3", max_workers=MAX_WORKERS
 )
 
-# TODO: Signatures for theorems!
 @LSP_SERVER.feature(
         lsp.TEXT_DOCUMENT_SIGNATURE_HELP,
-        lsp.SignatureHelpOptions(trigger_characters=["(", ")", "[", "]"])
+        lsp.SignatureHelpOptions(trigger_characters=["(", ")", "[", "]", "<", ">"])
 )
 def signature_help(ls : DeduceLanguageServer, params: lsp.SignatureHelpParams):
-    doc = ls.workspace.get_document(params.text_document.uri)
+    doc = ls.workspace.get_text_document(params.text_document.uri)
     current_line = doc.lines[params.position.line].strip()
     
     fun_match = False
     fun_i = 0
     fun_name = ""
 
+
+    brack_loc = None
+
     # TODO: Better parsing for where the characters are, esp since mixing functions and theorems
-    for m in re.finditer(r"[([](([^)],?)*)", current_line):
+    # Also because the theorem could have multiple blocks
+    for m in re.finditer(r"[([<](([^)],?)*)", current_line):
         if m.start() <= params.position.character and m.end() >=  params.position.character:
             fun_match = m
             fun_i = params.position.character - m.start()
-            fun_name = doc.word_at_position(
-                lsp.Position(
-                    params.position.line,
-                    m.start() - 1
-                )
-            )
+            brack_loc = m.start()
+            break
+
+    if brack_loc == None: 
+        brack_loc = params.position.character
+    else:
+
+        rev = { '<': '>', '[': ']' }
+    
+        i = brack_loc
+        while i > 0 and (current_line[brack_loc - 1]) == ">" or (current_line[brack_loc - 1]) == "]":
+            i -= 1
+            if rev[current_line[i]] == current_line[brack_loc-1]:
+                brack_loc = i
+        
+
+
+    fun_name = doc.word_at_position(
+        lsp.Position(
+            params.position.line,
+            brack_loc - 1
+        )
+    )
+
 
     fun_sig = fun_name
 
     for uri in ls.index:
         if fun_name in ls.index[uri]:
-            fun_sig = ls.index[uri][fun_name][2].split("\n")[0][:-1]
+            fun_sig = ls.index[uri][fun_name].str.split("\n")[0][:-1]
 
     # TODO: Use fun_i to do bold in the markdown help?
     # TODO: Combine both types of complete
@@ -235,12 +327,50 @@ def completions(ls : DeduceLanguageServer, params: lsp.CompletionParams):
     res = []
 
     for uri in ls.index:
-        res += [
-            lsp.CompletionItem(label=x, 
-                            #    label_details=lsp.CompletionItemLabelDetails("Asdf"), 
-                               kind=ls.index[doc.uri][x][3]) 
-            for x in filter(lambda k : k.find(word) != -1, ls.index[uri].keys())
-            ]
+        ops = ls.index[uri].search(word)
+
+        for k in ops:
+            # TODO: Induction advice, need these things from index
+            if isinstance(ls.index[uri][k].ast, Union) and current_line.startswith("induction"):
+                match ls.index[uri][k].ast:
+                  case Union(loc2, name, typarams, alts, isPrivate):
+                    ind_advice = 'induction ' + k + '\n'
+
+                    for alt in alts:
+                        match alt:
+                          case Constructor(loc3, constr_name, param_types):
+                            ind_params = [proof_checker.type_first_letter(ty)+str(i+1)\
+                              for i,ty in enumerate(param_types)]
+                            ind_advice += 'case ' + base_name(constr_name)
+                            if len(param_types) > 0:
+                              ind_advice += '(' + ', '.join(ind_params) + ')'
+                            num_recursive = sum([1 if proof_checker.is_recursive(name, ty) else 0 \
+                                                 for ty in param_types])
+                            if num_recursive > 0:
+                              rec_params =[(p,ty) for (p,ty) in zip(ind_params,param_types)\
+                                           if proof_checker.is_recursive(name, ty)]
+                              ind_advice += ' assume '
+                              ind_advice += ', '.join(['IH' + str(i+1) \
+                                    for i, (param,param_ty) in enumerate(rec_params)])
+
+                            ind_advice += ' {\n\t\t  ?\n}\n'
+
+
+                    res.append(
+                        lsp.CompletionItem(
+                            label = "induction " + k,
+                            # insert_text=ind_advice,
+                            text_edit= lsp.TextEdit(
+                                lsp.Range(
+                                    start=lsp.Position(params.position.line, params.position.character - len(current_line)),
+                                    end=lsp.Position(params.position.line, params.position.character)
+                                ),
+                                ind_advice
+                            )
+                    ))
+
+            res.append(lsp.CompletionItem(label=k, 
+                                   kind=ls.index[uri][k].completion))
 
     return res
 
@@ -278,7 +408,7 @@ def hover(ls : DeduceLanguageServer, params: lsp.HoverParams):
             return lsp.Hover(
                 contents=lsp.MarkupContent(
                     kind=lsp.MarkupKind.PlainText,
-                    value=ls.index[k][word][2]
+                    value=ls.index[k][word].str
                 ),
                 range=lsp.Range(
                     start=lsp.Position(line=pos.line, character=word_i),
@@ -299,7 +429,7 @@ def goto_definition(ls: DeduceLanguageServer, params: lsp.DefinitionParams):
     word = doc.word_at_position(params.position)
 
     if doc.uri in ls.index and word in ls.index[doc.uri]:
-        loc : Meta = ls.index[doc.uri][word][0]
+        loc : Meta = ls.index[doc.uri][word].loc
 
         return lsp.Location(uri=doc.uri, range=lsp.Range(
             start=lsp.Position(line=loc.line-1, character=loc.column - 1),
@@ -308,29 +438,12 @@ def goto_definition(ls: DeduceLanguageServer, params: lsp.DefinitionParams):
 
 
 
-# TODO: Is there someway to interrupt current parses?
-# Use threading?
-# def ls_parse(doc : workspace.TextDocument) -> list[lsp.Diagnostic]:
-#     try:
-#         parse(doc.source)
-#     except ParseError as e:
-#         return [lsp.Diagnostic(
-#                 message=e.base_message(),
-#                 severity=lsp.DiagnosticSeverity.Error,
-#                 range=lsp.Range(
-#                     start=lsp.Position(line=e.loc.line-1, character=e.loc.column-1),
-#                     end=lsp.Position(line=e.loc.end_line-1, character=e.loc.end_column-1)
-#                 )
-#             )]
-#     else:
-#         return []
-
 
 @LSP_SERVER.feature(lsp.TEXT_DOCUMENT_DID_OPEN)
-def did_open(ls : DeduceLanguageServer, params: lsp.DidOpenTextDocumentParams):
+async def did_open(ls : DeduceLanguageServer, params: lsp.DidOpenTextDocumentParams):
     """Parse each document when it is opened"""
     doc = ls.workspace.get_text_document(params.text_document.uri)
-    ls.inc_parse(doc)
+    await ls.debounce_parse(doc)
 
     diagnostics = ls.diagnostics[doc.uri]
 
@@ -340,29 +453,26 @@ def did_open(ls : DeduceLanguageServer, params: lsp.DidOpenTextDocumentParams):
 
 
 @LSP_SERVER.feature(lsp.TEXT_DOCUMENT_DID_CHANGE)
-def did_save(ls : DeduceLanguageServer, params: lsp.DidChangeTextDocumentParams):
-    """Parse each document when it is saved"""
+async def did_save(ls : DeduceLanguageServer, params: lsp.DidChangeTextDocumentParams):
+    """Parse each document when it is changed"""
     doc = ls.workspace.get_text_document(params.text_document.uri)
-    # diagnostics : list[lsp.Diagnostic] = ls_parse(doc)
-
-    ls.inc_parse(doc)
+    await ls.debounce_parse(doc)
 
     diagnostics = ls.diagnostics[doc.uri]
 
     LSP_SERVER.publish_diagnostics(
         uri=params.text_document.uri,
-        diagnostics = ls.diagnostics[doc.uri])
+        diagnostics = diagnostics)
 
 
 @LSP_SERVER.feature(lsp.TEXT_DOCUMENT_DID_SAVE)
-def did_save(ls : DeduceLanguageServer, params: lsp.DidSaveTextDocumentParams):
+async def did_save(ls : DeduceLanguageServer, params: lsp.DidSaveTextDocumentParams):
     """Parse each document when it is saved"""
     doc = ls.workspace.get_text_document(params.text_document.uri)
-    
-    ls.inc_parse(doc)
+    await ls.debounce_parse(doc)
 
     diagnostics = ls.diagnostics[doc.uri]
-    
+
     LSP_SERVER.publish_diagnostics(
         uri=params.text_document.uri,
         diagnostics = diagnostics)
