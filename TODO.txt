@@ -1,10 +1,13 @@
 [] Commit hooks to sync with deduce? / GH Action (My script is whack)
 
-[] Operators
+[] Limit imports searched to just the imports of the given file
+[] Type hints - When I type a colon, do the inline stuff for the type (if we can find it)
+[x] Operators
 [] Semantic Tokens
 [] Actual renaming of variables
   - Just run uniquify here? Would only work in the one file
   - Also need the location of the thing we're renaming somehow
+
 
 [] Incremental Parsing
   - Currently reparses everything that comes after?

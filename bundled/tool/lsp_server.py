@@ -98,6 +98,7 @@ class DocIndex():
         self.stmt_is = []
         self.data = {}
         self.one_grams = {}
+        # self.tokens = {}
     
 
     def add(self, k : str, v):
@@ -156,6 +157,17 @@ class DeduceLanguageServer(server.LanguageServer):
         task = asyncio.create_task(delayed_parse())
         self.pending_tasks[doc.uri] = task
         await task
+
+    # def tok_at_position(self, uri : str, position):
+    #     if uri not in self.index:
+    #         return None
+        
+    #     p_hash = position.line + "," + position.character
+
+    #     if p_hash not in self.index[uri].tokens:
+    #         return None
+    
+    #     return self.index[uri].tokens[p_hash]
 
     def inc_parse(self, doc : TextDocument):
         # doc_index = {"stmts": [], "stmt_is": []} if doc.uri not in self.index else self.index[doc.uri]
@@ -417,6 +429,14 @@ def hover(ls : DeduceLanguageServer, params: lsp.HoverParams):
             )
 
 
+all_ops = parser.expt_operators.union(parser.mult_operators).union(parser.add_operators).union(parser.compare_operators).union(parser.equal_operators).union(parser.iff_operators) 
+max_op_len = 3 # Just hardcoding for now
+
+def look_for_op(l, pos):
+    pos = pos-max_op_len + 1
+    for i in range(max_op_len, 0, -1):
+        if l[pos:pos+i] in all_ops:
+            return l[pos:pos+i]
 
 
 # TODO: Scope
@@ -428,6 +448,18 @@ def goto_definition(ls: DeduceLanguageServer, params: lsp.DefinitionParams):
 
     word = doc.word_at_position(params.position)
 
+    if word == 'operator' or word == '':
+        l = doc.lines[params.position.line]
+        i = params.position.character
+
+        while i < len(l):
+            o = look_for_op(l, i)
+            if o:
+                word = o
+                break
+            i += 1
+
+    # Prioritize the currently open document
     if doc.uri in ls.index and word in ls.index[doc.uri]:
         loc : Meta = ls.index[doc.uri][word].loc
 
@@ -435,7 +467,15 @@ def goto_definition(ls: DeduceLanguageServer, params: lsp.DefinitionParams):
             start=lsp.Position(line=loc.line-1, character=loc.column - 1),
             end=lsp.Position(line=loc.line-1, character=loc.column - 1)
         ))
+    else:
+        for uri in ls.index:
+            if word in ls.index[uri]:
+                loc : Meta = ls.index[uri][word].loc
 
+                return lsp.Location(uri=uri, range=lsp.Range(
+                    start=lsp.Position(line=loc.line-1, character=loc.column - 1),
+                    end=lsp.Position(line=loc.line-1, character=loc.column - 1)
+                ))
 
 
 

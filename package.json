@@ -2,7 +2,7 @@
     "name": "deduce-lsp",
     "displayName": "Deduce Language Server",
     "description": "LSP Support for deduce.",
-    "version": "0.0.3",
+    "version": "0.0.4",
     "preview": true,
     "serverInfo": {
         "name": "Deduce Language Server",

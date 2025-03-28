@@ -27,6 +27,7 @@ def get_deduce_directory():
     global deduce_directory
     return deduce_directory
 
+expt_operators = { '^' }
 mult_operators = {'*', '/', '%', '∘', '.o.'}
 add_operators = {'+', '-', '∪', '|', '∩', '&', '⨄', '.+.', '++', '⊝' }
 compare_operators = {'<', '>', '≤', '<=', '≥', '>=', '⊆', '(=', '∈', 'in'}
@@ -411,7 +412,7 @@ def parse_call():
   while (not end_of_file()) and current_token().type == 'LPAR':
     try:
       advance()
-      args = parse_term_list()
+      args = parse_term_list('RPAR')
       if current_token().type != 'RPAR':
         msg = 'expected closing parenthesis ")", not\n\t' \
           + current_token().value \
@@ -455,9 +456,25 @@ def parse_make_array():
   else:
     term = parse_call()
   return term
+
+
+def parse_term_expt():
+  term = parse_make_array()
+
+  while (not end_of_file()) and current_token().value in expt_operators:
+    start_token = current_token()
+    rator = Var(meta_from_tokens(current_token(), current_token()),
+                None, to_unicode.get(current_token().value,
+                                     current_token().value))
+    advance()
+    right = parse_make_array()
+    term = Call(meta_from_tokens(start_token, previous_token()), None,
+                rator, [term,right])
+    
+  return term
     
 def parse_term_mult():
-  term = parse_make_array()
+  term = parse_term_expt()
 
   while (not end_of_file()) and current_token().value in mult_operators:
     start_token = current_token()
@@ -465,7 +482,7 @@ def parse_term_mult():
                 None, to_unicode.get(current_token().value,
                                      current_token().value))
     advance()
-    right = parse_term_mult()
+    right = parse_term_expt()
     term = Call(meta_from_tokens(start_token, previous_token()), None,
                 rator, [term,right])
     
@@ -479,7 +496,7 @@ def parse_term_add():
     rator = Var(meta_from_tokens(current_token(), current_token()),
                 None, to_unicode.get(current_token().value, current_token().value))
     advance()
-    right = parse_term_add()
+    right = parse_term_mult()
     term = Call(meta_from_tokens(token, previous_token()), None,
                 rator, [term,right])
     
@@ -618,7 +635,7 @@ def parse_assumption():
 proof_keywords = {'apply', 'arbitrary', 'assume',
                   'cases', 'choose', 'conclude', 'conjunct',
                   'definition',
-                  'enable', 'equations', 'evaluate', 'extensionality',
+                  'equations', 'evaluate', 'extensionality',
                   'have', 'induction', 'injective', 'obtain',
                   'recall', 'reflexive', 'rewrite',
                   'suffices', 'suppose', 'switch', 'symmetric',
@@ -675,7 +692,7 @@ def parse_definition_proof():
 def parse_recall():
   start_token = current_token()
   advance()
-  facts = parse_term_list()
+  facts = parse_nonempty_term_list()
   meta = meta_from_tokens(start_token, previous_token())
   return PRecall(meta, facts)
   
@@ -999,7 +1016,7 @@ def parse_proof_med():
       
     while (not end_of_file()) and current_token().type == 'LSQB':
       advance()
-      term_list = parse_term_list()
+      term_list = parse_nonempty_term_list()
       if current_token().type != 'RSQB':
         raise ParseError(meta_from_tokens(current_token(),current_token()),
               'expected a closing "]", not\n\t' + current_token().value)
@@ -1056,7 +1073,7 @@ def parse_proof_statement():
     
   elif token.type == 'CHOOSE':
     advance()
-    witnesses = parse_term_list()
+    witnesses = parse_nonempty_term_list()
     meta = meta_from_tokens(token, previous_token())
     return SomeIntro(meta, witnesses, None)
     
@@ -1078,20 +1095,6 @@ def parse_proof_statement():
     meta = meta_from_tokens(token, previous_token())
     return SomeElim(meta, witnesses, label, premise, some, None)
     
-  elif token.type == 'ENABLE':
-    advance()
-    if current_token().type != 'LBRACE':
-      raise ParseError(meta_from_tokens(current_token(), current_token()),
-            'expected "{" after "enable"')
-    advance()
-    defs = parse_ident_list()
-    if current_token().type != 'RBRACE':
-      raise ParseError(meta_from_tokens(current_token(), current_token()),
-            'expected closing "}" in "enable"')
-    advance()
-    meta = meta_from_tokens(token, previous_token())
-    return EnableDefs(meta, [Var(meta, None, x) for x in defs], None)
-      
   elif token.type == 'HAVE':
     return parse_have()
 
@@ -1198,7 +1201,7 @@ def parse_proof():
           if not ex.missing:
               raise ex
           else:
-              body = PHole(meta_from_tokens(start_token, previous_token()))
+              body = PHole(meta_from_tokens(current_token(), current_token()))
         except Exception as e:
             raise ParseError(meta_from_tokens(current_token(), previous_token()), "Unexpected error while parsing:\n\t" \
               + str(e))
@@ -1209,12 +1212,23 @@ def parse_proof():
             proof_stmt.body = body
         return proof_stmt
     else:
-        return parse_finishing_proof()
+        ret = None
+        try:
+          ret = parse_finishing_proof()
+        except ParseError as ex:
+          if not ex.missing:
+              raise ex
+          else:
+              ret = PHole(meta_from_tokens(current_token(), current_token()))
+        except Exception as e:
+            raise ParseError(meta_from_tokens(current_token(), previous_token()), "Unexpected error while parsing:\n\t" \
+              + str(e))
+        return ret
 
 def parse_finishing_proof():
     start_token = current_token()
     proof = parse_proof_med()
-    while current_token().type == 'COMMA':
+    while not end_of_file() and current_token().type == 'COMMA':
       advance()
       right = parse_proof()
       proof = PTuple(meta_from_tokens(start_token, previous_token()), 
@@ -1752,7 +1766,7 @@ def parse_type():
     var = Var(meta_from_tokens(token,token), None, name)
     inst = False
     
-    if current_token().type == 'LESSTHAN':
+    if not end_of_file() and current_token().type == 'LESSTHAN':
       inst = True
       start_token = current_token()
       advance()
@@ -1799,7 +1813,19 @@ def parse_type_list():
     type_list.append(typ)
   return type_list
 
-def parse_term_list():
+def parse_term_list(end):
+  if current_token().type == end:
+      return []
+  else:
+      trm = parse_term()
+      trm_list = [trm]
+  while current_token().type == 'COMMA':
+    advance()
+    trm = parse_term()
+    trm_list.append(trm)
+  return trm_list
+
+def parse_nonempty_term_list():
   trm = parse_term()
   trm_list = [trm]
   while current_token().type == 'COMMA':

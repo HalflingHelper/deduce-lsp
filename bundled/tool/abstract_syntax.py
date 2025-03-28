@@ -9,8 +9,8 @@ import os
 
 infix_precedence = {'+': 6, '-': 6, '⊝': 6, '*': 7, '/': 7, '%': 7,
                     '=': 1, '<': 1, '≤': 1, '≥': 1, '>': 1, 'and': 2, 'or': 3,
-                    '++': 6, '⨄': 6, '∈':1, '∪':6, '∩':6, '⊆': 1, '⇔': 2, '∘': 7}
-prefix_precedence = {'-': 8, 'not': 4}
+                    '++': 6, '⨄': 6, '∈':1, '∪':6, '∩':6, '⊆': 1, '⇔': 2, '∘': 7, '^' : 8}
+prefix_precedence = {'-': 9, 'not': 4}
 
 ############ AST Base Classes ###########
 
@@ -750,6 +750,8 @@ class Var(Term):
         if res:
           if get_verbose():
             print('\t var ' + self.name + ' ===> ' + str(res))
+          if isinstance(res, Union): 
+            return self
           return res.reduce(env)
         else:
           return self
@@ -1891,8 +1893,8 @@ class IfThen(Formula):
 class All(Formula):
   var: Tuple[str,Type]
   # Position (s, e), where 
-  #  e : The number of vars in the block
   #  s : The variable's index in the list, starting from the last var
+  #  e : The number of vars in the block
   pos: Tuple[int, int]
   body: Formula
 
@@ -1983,10 +1985,17 @@ class Some(Formula):
   
   def reduce(self, env):
     n = len(self.vars)
-    return Some(self.location,
-                self.typeof,
-                [(x, ty.reduce(env)) for (x,ty) in self.vars],
-                self.body.reduce(env))
+    new_body = self.body.reduce(env)
+    match new_body:
+      case Bool(loc2, tyof, True):
+        return new_body
+      case Bool(loc2, tyof, False):
+        return new_body
+      case _:
+        return Some(self.location,
+                    self.typeof,
+                    [(x, ty.reduce(env)) for (x,ty) in self.vars],
+                    new_body)
   
   def substitute(self, sub):
     n = len(self.vars)
@@ -2154,7 +2163,7 @@ class Cases(Proof):
 
   def pretty_print(self, indent):
       cases_str = ''
-      for (label, frm, body) in cases:
+      for (label, frm, body) in self.cases:
           cases_str += indent*' ' + 'case ' + base_name(label) + ' : ' + str(frm) + '{\n' \
               + body.pretty_print(indent+2) + '\n' \
               + indent*' ' + '}'
@@ -2705,20 +2714,6 @@ class ApplyDefsFact(Proof):
     for d in self.definitions:
       d.uniquify(env)
     self.subject.uniquify(env)
-
-@dataclass
-class EnableDefs(Proof):
-  definitions: List[Term]
-  body: Proof
-
-  def __str__(self):
-      return 'enable { ' + ', '.join([str(d) for d in self.definitions]) \
-        + ' };' + maybe_str(self.body)
-
-  def uniquify(self, env):
-    for d in self.definitions:
-      d.uniquify(env)
-    self.body.uniquify(env)
     
 @dataclass
 class Rewrite(Proof):
@@ -3074,7 +3069,7 @@ class GenRecFun(Statement):
     return indent*' ' + 'recfun ' + complete_name(self.name) \
         + ('<' + ','.join([base_name(t) for t in self.type_params]) + '>' \
            if len(self.type_params) > 0 else '') \
-      + '(' + ', '.join([x + ':' + str(t) if t else x for (x,t) in self.vars])\
+      + '(' + ', '.join([base_name(x) + ':' + str(t) if t else x for (x,t) in self.vars])\
       + ') -> ' + str(self.returns)\
       + '\n\tmeasure ' + str(self.measure) \
       + ' {\n' + self.body.pretty_print(indent+2) + '\n}\n'
@@ -3509,7 +3504,7 @@ class Env:
     return None
       
   def __str__(self):
-    return ',\n'.join(['\t' + k + ': ' + str(v) \
+    return ',\n'.join(['\t' + base_name(k) + ': ' + str(v) \
                        for (k,v) in reversed(self.dict.items())])
 
   def __contains__(self, item):
@@ -3610,6 +3605,13 @@ class Env:
     else:
       return None
 
+  def _term_var_defined(self, curr, name):
+    if name in curr.keys():
+      binding = curr[name]
+      if isinstance(binding, TermBinding) or isinstance(binding, TypeBinding):
+        return True
+    return False
+
   def _value_of_term_var(self, curr, name):
     if name in curr.keys():
       return curr[name].defn
@@ -3646,13 +3648,13 @@ class Env:
 
   def term_var_is_defined(self, tvar):
     match tvar:
-      case Var(loc, tyof, name):
-        if self._type_of_term_var(self.dict, name):
-          return True
+      case Var(loc, tyof, name, resolved_names):
+        if isinstance(resolved_names, str):
+          error(loc, 'resolved_names is a string but should be a list: ' + str(tvar))
+        if len(resolved_names) > 0:
+          return any([self._term_var_defined(self.dict, x) for x in resolved_names])
         else:
-          return False
-      case _:
-        raise Exception('expected a term variable, not ' + str(tvar))
+          return self._term_var_defined(self.dict, name)
         
   def proof_var_is_defined(self, pvar):
     match pvar:

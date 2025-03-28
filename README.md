@@ -18,6 +18,10 @@ Created using this extension template: https://github.com/microsoft/vscode-pytho
 
 More to come
 
+## Known issues
+- Go-to for operators works a bit strangely on compound operators. For example, `<=` may send to `<`, depending on where is clicked.
+  - Potential fix : smarter regex for word at position, instead of using bespoke function
+
 ## Installation
 
 This is currently an extension in pre-release on the [marketplace](https://marketplace.visualstudio.com/manage/publishers/calvinjosenhans/extensions/deduce-lsp/hub?_a=acquisition)
@@ -27,6 +31,10 @@ This is currently an extension in pre-release on the [marketplace](https://marke
 - TODO
 
 ## Release Notes
+
+### 0.0.4
+- Deduce version sync
+- Go-to definition functionality for operators
 
 ### 0.0.3
 - Small speedups
