@@ -636,53 +636,12 @@ def parse_assumption():
 
 proof_keywords = {'apply', 'arbitrary', 'assume',
                   'cases', 'choose', 'conclude', 'conjunct',
-                  'definition',
+                  'expand',
                   'equations', 'evaluate', 'extensionality',
                   'have', 'induction', 'injective', 'obtain',
                   'recall', 'reflexive', 'replace',
                   'suffices', 'suppose', 'switch', 'symmetric',
                   'transitive'}
-
-# def parse_definition_proof():
-#   while_parsing = 'while parsing definition:\n' \
-#       + '\tconclusion ::= "definition" identifier_list_bar\n'
-#   token = current_token()
-#   advance()
-#   try:
-#     defs = parse_ident_list_bar()
-
-#     if current_token().type == 'AND':
-#         while_parsing = 'while parsing definition:\n' \
-#             + '\tconclusion ::= "definition" identifier_list_bar "and" "replace" proof_list\n'
-#         advance()
-#         if (current_token().type != 'REPLACE'):
-#             raise ParseError(meta_from_tokens(current_token(),current_token()),
-#                   'expected "replace" after "and" and "definition", not\n\t' \
-#                   + current_token().value)
-#         advance()
-#         eqns = parse_proof_list()
-#         meta = meta_from_tokens(token, previous_token())
-#         raise ParseError(meta, "definition-and-replace is deprecated, use expand and exchange instead")
-#         return ApplyDefsGoal(meta,
-#                               [Var(meta, None, t) for t in defs],
-#                               Rewrite(meta, eqns))
-#     elif current_token().type == 'IN':
-#         while_parsing = 'while parsing definition:\n' \
-#             + '\tconclusion ::= "definition" identifier_list_bar "in" proof\n'
-#         advance()
-#         subject = parse_proof()
-#         meta = meta_from_tokens(token, previous_token())
-#         return ApplyDefsFact(meta, [Var(meta, None, t) for t in defs],
-#                               subject)
-#     else:
-#         meta = meta_from_tokens(token, previous_token())
-#         raise ParseError(meta, "definition is deprecated, use expand instead")
-#         return ApplyDefs(meta, [Var(meta, None, n) for n in defs])
-#   except ParseError as e:
-#       raise e.extend(meta_from_tokens(token, previous_token()), while_parsing)
-#   except Exception as e:
-#     raise ParseError(meta_from_tokens(token, previous_token()), "Unexpected error while parsing:\n\t" \
-#       + str(e))
       
 def parse_recall():
   start_token = current_token()
@@ -848,20 +807,6 @@ def parse_proof_hi():
     meta = meta_from_tokens(token, token)
     return PReflexive(meta)
 
-  # elif (token.type == 'REPLACE'):
-  #   advance()
-  #   proofs = parse_proof_list()
-  #   if current_token().type == 'IN':
-  #     advance()
-  #     subject = parse_proof()
-  #     meta = meta_from_tokens(token, previous_token())
-  #     return RewriteFact(meta, subject, proofs)
-  #   else:
-  #     meta = meta_from_tokens(token, previous_token())
-  #     raise ParseError(meta, "replace is deprecated, use exchange")
-  #     return Rewrite(meta, proofs)
-    
-
   elif token.type == 'SWITCH':
     advance()
     subject = parse_term()
@@ -915,6 +860,9 @@ def parse_proof_hi():
         return EvaluateGoal(meta_from_tokens(token, previous_token()))
     
   else:
+    # TODO: Move closest_keyword to another place at some point, probably after parsing
+    # However, we haven't done that right now because we get esoteric error messages
+    # Maybe an idea is move this after parsing AND do this again for a parse error
     close_keyword = closest_keyword(token.value, proof_keywords)
     if close_keyword:
       raise ParseError(meta_from_tokens(token, token),
@@ -947,10 +895,11 @@ def parse_case():
     advance()
     label,premise = parse_assumption()
     if current_token().type != 'LBRACE':
-      raise ParseError(meta_from_tokens(start_token,current_token()),
+      loc = meta_from_tokens(start_token,current_token())
+      raise ParseError(loc,
             'expected a "{" after assumption of "case", not\n\t' \
-            + current_token().value \
-            + '\nwhile parsing:\n\t"case" label ":" formula "{" proof "}"')
+            + current_token().value) \
+        .extend(loc, 'while parsing:\n\t"case" label ":" formula "{" proof "}"')
     advance()
     body = parse_proof()
     if current_token().type != 'RBRACE':
@@ -975,10 +924,12 @@ def parse_proof_switch_case():
     else:
         assumptions = []
     if current_token().type != 'LBRACE':
-      raise ParseError(meta_from_tokens(start_token,current_token()),
+      loc = meta_from_tokens(start_token,current_token())
+      raise ParseError(loc,
             'expected a "{" after assumption of "case", not\n\t' \
-            + current_token().value \
-            + '\nwhile parsing one of the following\n' \
+            + current_token().value)\
+            .extend(loc,
+            'while parsing one of the following\n' \
             + '\tswitch_proof_case ::= "case" pattern "{" proof "}"\n' \
             + '\tswitch_proof_case ::= "case" pattern "assume" assumption_list "{" proof "}"')
     advance()
@@ -998,9 +949,10 @@ def parse_proof_med():
       advance()
       type_list = parse_type_list()
       if current_token().type != 'MORETHAN':
-        raise ParseError(meta_from_tokens(start_token,current_token()),
-              'expected a closing ">", not\n\t' + current_token().value + '\n'\
-              + 'while trying to parse type arguments for instantiation of an "all" formula:\n\t'\
+        loc = meta_from_tokens(start_token,current_token())
+        raise ParseError(loc,
+              'expected a closing ">", not\n\t' + quote(current_token().value)) \
+                 .extend(loc, 'while trying to parse type arguments for instantiation of an "all" formula:\n\t'\
               + 'proof ::= proof "<" type_list ">"')
       advance()
       meta = meta_from_tokens(start_token, previous_token())
@@ -1012,7 +964,8 @@ def parse_proof_med():
       term_list = parse_nonempty_term_list()
       if current_token().type != 'RSQB':
         raise ParseError(meta_from_tokens(current_token(),current_token()),
-              'expected a closing "]", not\n\t' + current_token().value)
+              'expected a closing "]", not\n\t' + current_token().value \
+              + '\nPerhaps you forgot a comma?')
       advance()
       meta = meta_from_tokens(start_token, previous_token())
       for j, term in enumerate(term_list):
@@ -1410,7 +1363,7 @@ def parse_theorem():
             + current_token().value)
     advance()
     return Theorem(meta_from_tokens(start_token, previous_token()),
-                   name, what, proof)
+                   name, what, proof, is_lemma)
   except ParseError as e:
     raise e.extend(meta_from_tokens(start_token, previous_token()),
                    while_parsing)
@@ -1674,7 +1627,7 @@ def parse_declaration():
     raise ParseError(meta_from_tokens(token, previous_token()), while_parsing \
       + str(e))
 
-statement_keywords = {'assert', 'define', 'function', 'import', 'print', 'theorem',
+statement_keywords = {'assert', 'define', 'import', 'print', 'theorem',
                       'union', 'private', 'opaque', 'recursive'}
 
 def parse_statement():

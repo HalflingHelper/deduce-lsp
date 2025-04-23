@@ -32,6 +32,12 @@ This is currently an extension in pre-release on the [marketplace](https://marke
 
 ## Release Notes
 
+### 0.0.6
+- Deduce version sync
+
+### 0.0.5
+- Deduce version sync
+
 ### 0.0.4
 - Deduce version sync
 - Go-to definition functionality for operators
